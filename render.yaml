@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: force-gym-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile.render
+    plan: free
+    envVars:
+      - key: SPRING_DATASOURCE_URL
+        value: jdbc:postgresql://roundhouse.proxy.rlwy.net:34284/railway
+      - key: SPRING_DATASOURCE_USERNAME
+        value: postgres
+      - key: SPRING_DATASOURCE_PASSWORD
+        sync: false
+      - key: FORCE_GYM_JWT_SECRET
+        generateValue: true
+    healthCheckPath: /actuator/health
