@@ -52,6 +52,11 @@ function Wait-ForHealth([string]$ServiceName, [string]$HealthUrl, [int]$TimeoutS
 }
 
 function Get-EnvironmentAssignments($service) {
+  # DB: usa Railway si las variables de entorno están definidas, si no usa local
+  $dbUrl      = if ($env:DB_URL)      { $env:DB_URL }      else { 'jdbc:postgresql://localhost:5432/forcegym_next' }
+  $dbUser     = if ($env:DB_USERNAME) { $env:DB_USERNAME } else { 'postgres' }
+  $dbPassword = if ($env:DB_PASSWORD) { $env:DB_PASSWORD } else { 'tilin' }
+
   $assignments = @(
     "`$env:SERVER_PORT='$($service.Port)'"
   )
@@ -62,19 +67,19 @@ function Get-EnvironmentAssignments($service) {
       $assignments += "`$env:CONFIG_REPO_LOCATION='$configRepoUri'"
     }
     'service-membresia' {
-      $assignments += "`$env:SPRING_DATASOURCE_URL='jdbc:postgresql://localhost:5432/forcegym_next'"
-      $assignments += "`$env:SPRING_DATASOURCE_USERNAME='postgres'"
-      $assignments += "`$env:SPRING_DATASOURCE_PASSWORD='tilin'"
+      $assignments += "`$env:SPRING_DATASOURCE_URL='$dbUrl'"
+      $assignments += "`$env:SPRING_DATASOURCE_USERNAME='$dbUser'"
+      $assignments += "`$env:SPRING_DATASOURCE_PASSWORD='$dbPassword'"
     }
     'service-rutinas' {
-      $assignments += "`$env:SPRING_DATASOURCE_URL='jdbc:postgresql://localhost:5432/forcegym_next'"
-      $assignments += "`$env:SPRING_DATASOURCE_USERNAME='postgres'"
-      $assignments += "`$env:SPRING_DATASOURCE_PASSWORD='tilin'"
+      $assignments += "`$env:SPRING_DATASOURCE_URL='$dbUrl'"
+      $assignments += "`$env:SPRING_DATASOURCE_USERNAME='$dbUser'"
+      $assignments += "`$env:SPRING_DATASOURCE_PASSWORD='$dbPassword'"
     }
     'service-gateway' {
-      $assignments += "`$env:SPRING_DATASOURCE_URL='jdbc:postgresql://localhost:5432/forcegym_next'"
-      $assignments += "`$env:SPRING_DATASOURCE_USERNAME='postgres'"
-      $assignments += "`$env:SPRING_DATASOURCE_PASSWORD='tilin'"
+      $assignments += "`$env:SPRING_DATASOURCE_URL='$dbUrl'"
+      $assignments += "`$env:SPRING_DATASOURCE_USERNAME='$dbUser'"
+      $assignments += "`$env:SPRING_DATASOURCE_PASSWORD='$dbPassword'"
       $assignments += "`$env:SERVICE_CONFIG_URL='http://localhost:8081'"
       $assignments += "`$env:SERVICE_MEMBRESIA_URL='http://localhost:8082'"
       $assignments += "`$env:SERVICE_RUTINAS_URL='http://localhost:8083'"
@@ -98,8 +103,8 @@ if (-not (Test-Path -LiteralPath $mavenWrapper)) {
   throw "No se encontro mvnw.cmd en $backendRoot"
 }
 
-if (-not (Test-PortListening -Port 5432)) {
-  throw 'PostgreSQL no esta escuchando en localhost:5432. Arranca la base antes del backend.'
+if (-not $env:DB_URL -and -not (Test-PortListening -Port 5432)) {
+  throw 'PostgreSQL no esta escuchando en localhost:5432. Arranca la base antes del backend, o define $env:DB_URL con la URL de Railway.'
 }
 
 $runningPorts = @()
