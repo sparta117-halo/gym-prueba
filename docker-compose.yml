@@ -1,0 +1,138 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: force-gym-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: forcegym_next
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: tilin
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/postgresql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d forcegym_next"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  service-config:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        MODULE: service-config
+    environment:
+      SERVER_PORT: 8081
+      CONFIG_REPO_LOCATION: file:/app/config-repo
+    ports:
+      - "8081:8081"
+
+  service-membresia:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        MODULE: service-membresia
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8082
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/forcegym_next
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: tilin
+    ports:
+      - "8082:8082"
+
+  service-rutinas:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        MODULE: service-rutinas
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8083
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/forcegym_next
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: tilin
+    ports:
+      - "8083:8083"
+
+  service-media:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        MODULE: service-media
+    environment:
+      SERVER_PORT: 8084
+    ports:
+      - "8084:8084"
+
+  service-scheluder:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        MODULE: service-scheluder
+    environment:
+      SERVER_PORT: 8085
+    ports:
+      - "8085:8085"
+
+  service-gateway:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        MODULE: service-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      service-config:
+        condition: service_started
+      service-membresia:
+        condition: service_started
+      service-rutinas:
+        condition: service_started
+      service-media:
+        condition: service_started
+      service-scheluder:
+        condition: service_started
+    environment:
+      SERVER_PORT: 8080
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/forcegym_next
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: tilin
+      SERVICE_CONFIG_URL: http://service-config:8081
+      SERVICE_MEMBRESIA_URL: http://service-membresia:8082
+      SERVICE_RUTINAS_URL: http://service-rutinas:8083
+      SERVICE_MEDIA_URL: http://service-media:8084
+      SERVICE_SCHELUDER_URL: http://service-scheluder:8085
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        FORCE_GYM_API_BASE: http://service-gateway:8080/api
+    depends_on:
+      service-gateway:
+        condition: service_started
+    environment:
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      FORCE_GYM_API_BASE: http://service-gateway:8080/api
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:

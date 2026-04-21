@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+WRAPPER_PROPS="$SCRIPT_DIR/.mvn/wrapper/maven-wrapper.properties"
+MAVEN_VERSION="3.9.9"
+DIST_URL="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.zip"
+
+if [ -x "/c/Program Files/Java/jdk-21/bin/java.exe" ]; then
+  export JAVA_HOME="/c/Program Files/Java/jdk-21"
+  export PATH="$JAVA_HOME/bin:$PATH"
+fi
+
+if [ -f "$WRAPPER_PROPS" ]; then
+  DIST_URL=$(sed -n 's/^distributionUrl=//p' "$WRAPPER_PROPS")
+fi
+
+MAVEN_DIR="$SCRIPT_DIR/.mvn/apache-maven-${MAVEN_VERSION}"
+MAVEN_BIN="$MAVEN_DIR/bin/mvn"
+
+if [ ! -x "$MAVEN_BIN" ]; then
+  mkdir -p "$SCRIPT_DIR/.mvn"
+  ZIP_PATH="$SCRIPT_DIR/.mvn/apache-maven.zip"
+  EXTRACT_PATH="$SCRIPT_DIR/.mvn/apache-maven-extract"
+  rm -rf "$EXTRACT_PATH"
+  curl -fsSL "$DIST_URL" -o "$ZIP_PATH"
+  unzip -q "$ZIP_PATH" -d "$EXTRACT_PATH"
+  FIRST_DIR=$(find "$EXTRACT_PATH" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+  rm -rf "$MAVEN_DIR"
+  mv "$FIRST_DIR" "$MAVEN_DIR"
+  rm -f "$ZIP_PATH"
+  rm -rf "$EXTRACT_PATH"
+fi
+
+exec "$MAVEN_BIN" "$@"

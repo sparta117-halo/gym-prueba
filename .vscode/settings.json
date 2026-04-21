@@ -1,0 +1,8 @@
+{
+    "cmake.sourceDirectory": "D:/APP1-main/linux/flutter",
+    "chat.tools.terminal.autoApprove": {
+        "flutter": true,
+        "where.exe": true
+    },
+    "java.jdt.ls.vmargs": "-XX:+UseParallelGC -XX:GCTimeRatio=4 -XX:AdaptiveSizePolicyWeight=90 -Dsun.zip.disableMemoryMapping=true -Xmx4G -Xms100m -Xlog:disable"
+}

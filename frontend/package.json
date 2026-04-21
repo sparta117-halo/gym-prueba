@@ -1,0 +1,31 @@
+{
+  "name": "force-gym-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "dev:lan": "next dev -H 0.0.0.0 -p 3000",
+    "build": "next build",
+    "serve:prod": "next start -H 0.0.0.0 -p 3000",
+    "start": "node .next/standalone/server.js",
+    "start:lan": "set HOSTNAME=0.0.0.0&& set PORT=3000&& node .next/standalone/server.js",
+    "proxy:https": "local-ssl-proxy --source 3443 --target 3000 --hostname 0.0.0.0",
+    "web": "powershell -ExecutionPolicy Bypass -File ..\\start-all.ps1",
+    "web:stop": "powershell -ExecutionPolicy Bypass -File ..\\stop-all.ps1",
+    "web:restart": "powershell -ExecutionPolicy Bypass -File ..\\restart-all.ps1"
+  },
+  "dependencies": {
+    "@ducanh2912/next-pwa": "^10.2.9",
+    "idb": "^8.0.3",
+    "next": "^15.3.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "local-ssl-proxy": "^2.0.5",
+    "typescript": "^5.8.3"
+  }
+}

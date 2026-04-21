@@ -1,0 +1,19 @@
+server:
+  port: ${SERVER_PORT:8081}
+
+spring:
+  application:
+    name: service-config
+  profiles:
+    active: native
+  cloud:
+    config:
+      server:
+        native:
+          search-locations: ${CONFIG_REPO_LOCATION:file:../config-repo}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

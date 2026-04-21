@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Force Gym Local",
+      "Group": "Force Gym",
+      "Host": "127.0.0.1",
+      "Port": 5432,
+      "MaintenanceDB": "postgres",
+      "Username": "postgres",
+      "SSLMode": "prefer",
+      "Comment": "Servidor local para forcegym_next"
+    }
+  }
+}

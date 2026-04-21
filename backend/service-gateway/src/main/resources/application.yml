@@ -1,0 +1,56 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: service-gateway
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/forcegym_next}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:tilin}
+  cloud:
+    gateway:
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOrigins: "*"
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - PATCH
+              - DELETE
+              - OPTIONS
+            allowedHeaders: "*"
+      routes:
+        - id: service-config
+          uri: ${SERVICE_CONFIG_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/config/**
+        - id: service-membresia
+          uri: ${SERVICE_MEMBRESIA_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/membresia/**
+        - id: service-rutinas
+          uri: ${SERVICE_RUTINAS_URL:http://localhost:8083}
+          predicates:
+            - Path=/api/rutinas/**
+        - id: service-media
+          uri: ${SERVICE_MEDIA_URL:http://localhost:8084}
+          predicates:
+            - Path=/api/media/**
+        - id: service-scheluder
+          uri: ${SERVICE_SCHELUDER_URL:http://localhost:8085}
+          predicates:
+            - Path=/api/scheluder/**
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+force-gym:
+  security:
+    jwt-secret: ${FORCE_GYM_JWT_SECRET:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF}
+    access-token-minutes: 15

@@ -1,0 +1,8 @@
+force-gym:
+  sync:
+    interval-minutes: 60
+  updates:
+    prompt-on-online: true
+  security:
+    access-token-minutes: 15
+    refresh-token-days: 7
