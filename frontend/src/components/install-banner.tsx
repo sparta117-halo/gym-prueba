@@ -16,13 +16,17 @@ type BeforeInstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
 };
 
+type InstallBannerProps = {
+  compact?: boolean;
+};
+
 declare global {
   interface WindowEventMap {
     beforeinstallprompt: BeforeInstallPromptEvent;
   }
 }
 
-export function InstallBanner() {
+export function InstallBanner({ compact = false }: InstallBannerProps) {
   const [promptEvent, setPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [installed, setInstalled] = useState(false);
   const [dismissed, setDismissed] = useState(false);
@@ -103,7 +107,7 @@ export function InstallBanner() {
 
   if (dismissed) {
     return (
-      <div className="install-launcher">
+      <div className={`install-launcher${compact ? " install-launcher--compact" : ""}`}>
         <button
           className="button button-primary"
           onClick={() => {
@@ -116,6 +120,42 @@ export function InstallBanner() {
           Descargar app
         </button>
       </div>
+    );
+  }
+
+  if (compact) {
+    return (
+      <aside className="install-banner install-banner--compact">
+        <div className="install-banner__content">
+          <p className="install-banner__eyebrow">App del gym</p>
+          <strong>Instalar</strong>
+          <p>Guarda Force Gym como app sin tapar el panel.</p>
+          {fallbackMessage ? <p className="install-banner__fallback">{fallbackMessage}</p> : null}
+        </div>
+
+        <div className="install-banner__actions">
+          <button
+            className="button button-primary"
+            onClick={() => {
+              void requestInstall();
+            }}
+            type="button"
+          >
+            Instalar
+          </button>
+
+          <button
+            className="button button-secondary"
+            onClick={() => {
+              window.localStorage.setItem(DISMISS_KEY, "1");
+              setDismissed(true);
+            }}
+            type="button"
+          >
+            Ocultar
+          </button>
+        </div>
+      </aside>
     );
   }
 

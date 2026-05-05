@@ -1,12 +1,10 @@
 package com.forcegym.app.api;
 
 import com.forcegym.app.security.JwtTokenService;
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -30,7 +28,8 @@ public class AuthController {
 
   @PostMapping("/login")
   @ResponseStatus(HttpStatus.OK)
-  public LoginResponse login(@Valid @RequestBody LoginRequest request) {
+  public LoginResponse login(@RequestBody LoginRequest request) {
+    final String username = resolveUsername(request);
     final List<UserRow> users = jdbcTemplate.query(
         """
             select id::text as id, username, password_hash, user_type
@@ -43,18 +42,19 @@ public class AuthController {
             rs.getString("username"),
             rs.getString("password_hash"),
             rs.getString("user_type")),
-        request.username());
+        username);
 
     if (users.isEmpty()) {
       throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Credenciales invalidas");
     }
 
     final UserRow user = users.getFirst();
-    if (!user.passwordHash().equals(request.password())) {
+    final String password = resolvePassword(request, user.userType(), user.username());
+    if (!user.passwordHash().equals(password)) {
       throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Credenciales invalidas");
     }
 
-    final List<String> roles = jdbcTemplate.query(
+    final List<String> roles = new ArrayList<>(jdbcTemplate.query(
         """
             select r.code
             from user_roles ur
@@ -63,7 +63,11 @@ public class AuthController {
             order by r.code asc
             """,
         (rs, rowNum) -> rs.getString("code"),
-        user.id());
+            user.id()));
+
+        if (roles.isEmpty() && hasText(user.userType())) {
+          roles.add(user.userType().trim().toUpperCase());
+        }
 
     final String accessToken = jwtTokenService.createAccessToken(
         user.id(), user.username(), user.userType(), roles);
@@ -74,7 +78,54 @@ public class AuthController {
         new UserProfile(user.id(), user.username(), user.userType(), roles));
   }
 
-  public record LoginRequest(@NotBlank String username, @NotBlank String password) {}
+  private String resolveUsername(LoginRequest request) {
+    final String qrCode = trimToNull(request.qrCode());
+    if (qrCode != null) {
+      return parseQrCode(qrCode);
+    }
+
+    final String username = trimToNull(request.username());
+    if (username == null) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Debes indicar un usuario o un QR.");
+    }
+    return username;
+  }
+
+  private String resolvePassword(LoginRequest request, String userType, String username) {
+    final String password = trimToNull(request.password());
+    if (password != null) {
+      return password;
+    }
+    if ("MEMBER".equalsIgnoreCase(userType)) {
+      return username;
+    }
+    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "La contraseña es obligatoria.");
+  }
+
+  private String parseQrCode(String rawQrCode) {
+    final String normalized = rawQrCode.trim();
+    if (normalized.regionMatches(true, 0, "FGM:", 0, 4)) {
+      final String memberCode = trimToNull(normalized.substring(4));
+      if (memberCode != null) {
+        return memberCode.toUpperCase();
+      }
+    }
+    return normalized.toUpperCase();
+  }
+
+  private String trimToNull(String value) {
+    if (value == null) {
+      return null;
+    }
+    final String normalized = value.trim();
+    return normalized.isEmpty() ? null : normalized;
+  }
+
+  private boolean hasText(String value) {
+    return trimToNull(value) != null;
+  }
+
+  public record LoginRequest(String username, String password, String qrCode) {}
 
   public record LoginResponse(String accessToken, String expiresAt, UserProfile user) {}
 

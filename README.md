@@ -2,6 +2,18 @@
 
 La interfaz principal del proyecto ahora vive en `frontend/` y usa Next.js como PWA instalable. El backend Spring Boot modular permanece en `backend/`.
 
+## Despliegue recomendado
+
+La ruta recomendada para publicar esta app es separar frontend y backend:
+
+- Frontend en Vercel usando `frontend/`
+- Backend monolitico en Render, Koyeb o cualquier host Docker usando el `Dockerfile` de la raiz
+- Base de datos PostgreSQL externa, por ejemplo Neon
+
+No intentes subir el stack completo de microservicios a un hosting gratis simple. `docker-compose.yml` existe para local. En la nube, la ruta mantenible es el monolito de `backend/app` que ya expone `/api/...` para el frontend.
+
+GitHub Pages no sirve para correr el backend Java ni PostgreSQL. Solo puede publicar archivos estaticos.
+
 ## Nuevo frontend web
 
 - Framework: Next.js App Router
@@ -41,6 +53,8 @@ Si necesitas otra URL de backend, define `FORCE_GYM_API_BASE` en `frontend/.env.
 FORCE_GYM_API_BASE=https://tu-dominio/api
 NEXT_PUBLIC_FORCE_GYM_API_BASE=https://tu-dominio/api
 ```
+
+En Vercel configura esas mismas variables apuntando a tu backend desplegado, por ejemplo `https://force-gym-backend.onrender.com/api`.
 
 ## Como generar la PWA
 
@@ -162,6 +176,16 @@ Esto levanta PostgreSQL, los microservicios Spring Boot y el frontend Next en `h
 La web usa `/api/*` hacia `service-gateway`, por lo que en Compose no necesitas cambiar la URL base del navegador.
 
 Si otro dispositivo entra a `http://IP-DE-TU-PC:3000`, usara el mismo backend y la misma base `forcegym_next`, por lo que todos veran y grabaran sobre los mismos datos.
+
+## Backend monolitico para nube
+
+Si quieres probar localmente la misma forma que se recomienda para despliegue:
+
+```bash
+docker compose -f docker-compose.monolith.yml up --build
+```
+
+Ese compose levanta PostgreSQL mas el backend monolitico del `Dockerfile` raiz. Es la ruta mas cercana a un despliegue real en hosting.
 
 ## Base de datos
 

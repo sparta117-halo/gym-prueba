@@ -4,6 +4,7 @@ import com.forcegym.app.service.MembresiaSyncService;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -22,19 +23,28 @@ public class MembresiaSyncController {
   }
 
   @GetMapping("/bootstrap")
-  public BootstrapResponse bootstrap() {
-    return syncService.bootstrap();
+  public BootstrapResponse bootstrap(Authentication authentication) {
+    return syncService.bootstrap(usernameOf(authentication), isMember(authentication));
   }
 
   @GetMapping("/sync/pull")
-  public PullSyncResponse pull() {
-    return syncService.pull();
+  public PullSyncResponse pull(Authentication authentication) {
+    return syncService.pull(usernameOf(authentication), isMember(authentication));
   }
 
   @PostMapping("/sync/push")
   @ResponseStatus(HttpStatus.ACCEPTED)
-  public PushSyncResponse push(@RequestBody PushSyncRequest request) {
-    return syncService.push(request);
+  public PushSyncResponse push(@RequestBody PushSyncRequest request, Authentication authentication) {
+    return syncService.push(request, usernameOf(authentication), isMember(authentication));
+  }
+
+  private boolean isMember(Authentication authentication) {
+    return authentication != null
+        && authentication.getAuthorities().stream().anyMatch(a -> "ROLE_MEMBER".equals(a.getAuthority()));
+  }
+
+  private String usernameOf(Authentication authentication) {
+    return authentication == null ? null : authentication.getName();
   }
 
   public record BootstrapResponse(

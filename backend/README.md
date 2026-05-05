@@ -2,6 +2,15 @@
 
 Backend Java modular para la PWA offline-first.
 
+## Ruta recomendada para nube
+
+Este repo tiene dos modos de backend:
+
+- Microservicios en este directorio, pensados para desarrollo local con `docker-compose.yml`
+- Monolito cloud en `app/`, pensado para despliegue real en hosting simple
+
+Si vas a publicar la app en internet, usa `app/` como backend y deja estos microservicios para local. Esa decision evita tener que hospedar gateway, config, membresia, rutinas, media, scheduler y PostgreSQL por separado.
+
 ## Servicios
 
 - `service-gateway`: punto unico de entrada para el frontend.
@@ -74,6 +83,8 @@ El compose principal usa la base `forcegym_next`, publica gateway en `8080` y la
 
 ## Variables para hosting
 
+Para microservicios necesitas:
+
 - `SPRING_DATASOURCE_URL`
 - `SPRING_DATASOURCE_USERNAME`
 - `SPRING_DATASOURCE_PASSWORD`
@@ -86,6 +97,13 @@ El compose principal usa la base `forcegym_next`, publica gateway en `8080` y la
 - `CONFIG_REPO_LOCATION`
 
 Con estas variables puedes usar el mismo backend en local y en un host sin dejar rutas o credenciales fijas en `localhost`.
+
+Para despliegue recomendado con el monolito de `app/` solo necesitas:
+
+- `SPRING_DATASOURCE_URL`
+- `SPRING_DATASOURCE_USERNAME`
+- `SPRING_DATASOURCE_PASSWORD`
+- `FORCE_GYM_JWT_SECRET`
 
 ## pgAdmin
 

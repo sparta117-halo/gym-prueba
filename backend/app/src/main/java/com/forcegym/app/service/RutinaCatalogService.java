@@ -48,6 +48,10 @@ public class RutinaCatalogService {
         defaultTenantId());
   }
 
+  public List<RoutineCatalogItem> listCatalogForMember(String memberCode) {
+    return listCatalog();
+  }
+
   public RoutineCatalogItem create(UpsertRoutineRequest request) {
     final UUID routineId = UUID.randomUUID();
     jdbcTemplate.update(

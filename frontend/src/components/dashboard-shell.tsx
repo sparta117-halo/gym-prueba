@@ -1,6 +1,8 @@
 "use client";
 
-import { FormEvent, useDeferredValue, useEffect, useMemo, useState, useTransition } from "react";
+import { ChangeEvent, FormEvent, useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import QRCode from "qrcode";
+import QrScanner from "qr-scanner";
 
 import { InstallBanner } from "@/components/install-banner";
 import {
@@ -35,12 +37,24 @@ const SESSION_KEY = "force_gym.session.v1";
 const DEVICE_KEY = "force_gym.device_id.v1";
 const LAST_SYNC_KEY = "force_gym.last_sync.v1";
 
+type ScannerMode = "login" | "attendance";
+
+type ToastState = {
+  kind: "success" | "error";
+  message: string;
+};
+
+type DeleteDialogState = {
+  id: string;
+  code: string;
+  name: string;
+};
+
 type DraftState = {
   code: string;
   nombre: string;
   apellido: string;
   telefono: string;
-  password: string;
   fechaInicio: string;
   meses: string;
 };
@@ -61,7 +75,6 @@ const emptyDraft = (): DraftState => ({
   nombre: "",
   apellido: "",
   telefono: "",
-  password: "123456",
   fechaInicio: toDateInputValue(),
   meses: "1"
 });
@@ -122,14 +135,52 @@ function getDeviceId() {
   return created;
 }
 
+function buildQrToken(memberCode: string) {
+  return `FGM:${memberCode.trim().toUpperCase()}`;
+}
+
+function parseQrMemberCode(rawQr: string) {
+  const normalized = rawQr.trim();
+  if (normalized.toUpperCase().startsWith("FGM:")) {
+    return normalized.slice(4).trim().toUpperCase();
+  }
+  return normalized.toUpperCase();
+}
+
+function normalizeUiErrorMessage(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) {
+    return fallback;
+  }
+
+  const cleaned = error.message.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return fallback;
+  }
+
+  if (/Failed to fetch|NetworkError/i.test(cleaned)) {
+    return "No se pudo conectar con el servidor.";
+  }
+
+  if (/AbortError/i.test(cleaned)) {
+    return "La solicitud tardó demasiado.";
+  }
+
+  if (/NotAllowedError|Permission denied|denegado/i.test(cleaned)) {
+    return "Debes permitir el acceso a la camara para usar el QR.";
+  }
+
+  return cleaned.length > 180 ? fallback : cleaned;
+}
+
 function toMemberRecord(draft: DraftState, existing?: MemberRecord): MemberRecord {
   const startIso = new Date(`${draft.fechaInicio}T00:00:00.000Z`).toISOString();
   const months = Math.max(1, Number.parseInt(draft.meses, 10) || 1);
+  const resolvedCode = existing?.code ?? draft.code.trim().toUpperCase();
 
   return {
     id: existing?.id ?? crypto.randomUUID(),
-    code: draft.code.trim().toUpperCase(),
-    password: draft.password.trim() || "123456",
+    code: resolvedCode,
+    password: existing?.password,
     nombre: draft.nombre.trim(),
     apellido: draft.apellido.trim(),
     telefono: draft.telefono.trim(),
@@ -137,6 +188,7 @@ function toMemberRecord(draft: DraftState, existing?: MemberRecord): MemberRecor
     fechaFin: addMonthsIso(startIso, months),
     meses: months,
     diaPago: new Date(startIso).getUTCDate(),
+    qrToken: existing?.qrToken ?? (resolvedCode ? buildQrToken(resolvedCode) : undefined),
     asistencias: existing?.asistencias ?? [],
     pagos: existing?.pagos ?? [],
     progreso: existing?.progreso ?? []
@@ -149,7 +201,6 @@ function toDraft(member: MemberRecord): DraftState {
     nombre: member.nombre,
     apellido: member.apellido,
     telefono: member.telefono,
-    password: member.password,
     fechaInicio: toDateInputValue(member.fechaInicio),
     meses: `${member.meses}`
   };
@@ -188,7 +239,22 @@ function memberFullName(member: MemberRecord) {
   return `${member.nombre} ${member.apellido}`.trim();
 }
 
+function isSessionExpired(session: AuthSession) {
+  const expiresAt = Date.parse(session.expiresAt);
+  if (Number.isNaN(expiresAt)) {
+    return false;
+  }
+
+  return expiresAt <= Date.now();
+}
+
 export function DashboardShell() {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const scannerImageInputRef = useRef<HTMLInputElement | null>(null);
+  const scannerRef = useRef<QrScanner | null>(null);
+  const scannerLockRef = useRef(false);
+  const syncActiveRef = useRef(false);
+  const syncQueuedRef = useRef(false);
   const [session, setSession] = useState<AuthSession | null>(null);
   const [members, setMembers] = useState<MemberRecord[]>([]);
   const [queueCount, setQueueCount] = useState(0);
@@ -205,17 +271,36 @@ export function DashboardShell() {
   const [showPassword, setShowPassword] = useState(false);
   const [routineBusy, setRoutineBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scannerError, setScannerError] = useState<string | null>(null);
+  const [scannerStarting, setScannerStarting] = useState(false);
+  const [scannerReady, setScannerReady] = useState(false);
+  const [scannerReloadKey, setScannerReloadKey] = useState(0);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin");
+  const [loginMode, setLoginMode] = useState<"admin" | "member">("admin");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [draft, setDraft] = useState<DraftState>(emptyDraft);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [routineDraft, setRoutineDraft] = useState<RoutineDraftState>(emptyRoutineDraft);
   const [editingRoutineId, setEditingRoutineId] = useState<string | null>(null);
+  const [scannerMode, setScannerMode] = useState<ScannerMode | null>(null);
+  const [qrImages, setQrImages] = useState<Record<string, string>>({});
+  const [deletingMemberId, setDeletingMemberId] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const [deleteDialog, setDeleteDialog] = useState<DeleteDialogState | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const deferredSearch = useDeferredValue(search);
+  const isMemberSession = session?.user.userType === "MEMBER" || session?.user.roles.includes("MEMBER") || false;
+
+  const currentMember = useMemo(() => {
+    if (!isMemberSession || !session) {
+      return null;
+    }
+
+    return members.find((member) => member.code === session.user.username) ?? members[0] ?? null;
+  }, [isMemberSession, members, session]);
 
   const filteredMembers = useMemo(() => {
     const query = deferredSearch.trim().toLowerCase();
@@ -278,6 +363,19 @@ export function DashboardShell() {
 
   const latestAttendances = useMemo(() => [...serverAttendances].sort((left, right) => right.occurredAt.localeCompare(left.occurredAt)).slice(0, 8), [serverAttendances]);
 
+  useEffect(() => {
+    if (!toast) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => setToast(null), 2600);
+    return () => window.clearTimeout(timeoutId);
+  }, [toast]);
+
+  function showToast(kind: ToastState["kind"], message: string) {
+    setToast({ kind, message });
+  }
+
   async function refreshLocalState() {
     const [storedMembers, pendingCount] = await Promise.all([getAllMembers(), getQueueCount()]);
     setMembers(storedMembers);
@@ -298,44 +396,63 @@ export function DashboardShell() {
       return;
     }
 
+    if (isSessionExpired(currentSession)) {
+      writeSession(null);
+      setSession(null);
+      setTenantMeta(null);
+      setError("La sesion vencio. Vuelve a iniciar sesion para seguir guardando y sincronizando.");
+      return;
+    }
+
+    if (syncActiveRef.current) {
+      syncQueuedRef.current = true;
+      return;
+    }
+
+    syncActiveRef.current = true;
     setSyncing(true);
     setError(null);
 
     try {
-      const queued = await getQueuedOperations();
-      if (queued.length > 0) {
-        const pushed = await pushOperations(queued, currentSession);
-        if (pushed.accepted === queued.length && pushed.rejected === 0) {
-          await clearQueue();
+      do {
+        syncQueuedRef.current = false;
+
+        const queued = await getQueuedOperations();
+        if (queued.length > 0) {
+          const pushed = await pushOperations(queued, currentSession);
+          if (pushed.accepted === queued.length && pushed.rejected === 0) {
+            await clearQueue();
+          }
         }
-      }
 
-      const [metaResponse, remoteMembers, nextClientConfig, nextVersionInfo, nextRoutineCatalog, nextMediaAssets] = await Promise.all([
-        bootstrap(currentSession),
-        pullMembers(currentSession),
-        fetchClientConfig(currentSession),
-        fetchVersionInfo(currentSession),
-        fetchRoutineCatalog(currentSession),
-        fetchMediaAssets(currentSession)
-      ]);
+        const [metaResponse, remoteMembers, nextClientConfig, nextVersionInfo, nextRoutineCatalog, nextMediaAssets] = await Promise.all([
+          bootstrap(currentSession),
+          pullMembers(currentSession),
+          fetchClientConfig(currentSession),
+          fetchVersionInfo(currentSession),
+          fetchRoutineCatalog(currentSession),
+          fetchMediaAssets(currentSession)
+        ]);
 
-      setTenantMeta(metaResponse.meta);
-      setClientConfig(nextClientConfig);
-      setVersionInfo(nextVersionInfo);
-      setRoutineCatalog(nextRoutineCatalog);
-      setMediaAssets(nextMediaAssets);
-      setServerPayments(metaResponse.payments);
-      setServerAttendances(metaResponse.attendances);
-      await replaceMembers(remoteMembers);
-      await refreshLocalState();
+        setTenantMeta(metaResponse.meta);
+        setClientConfig(nextClientConfig);
+        setVersionInfo(nextVersionInfo);
+        setRoutineCatalog(nextRoutineCatalog);
+        setMediaAssets(nextMediaAssets);
+        setServerPayments(metaResponse.payments);
+        setServerAttendances(metaResponse.attendances);
+        await replaceMembers(remoteMembers);
+        await refreshLocalState();
 
-      const syncedAt = new Date().toISOString();
-      setLastSyncAt(syncedAt);
-      window.localStorage.setItem(LAST_SYNC_KEY, syncedAt);
+        const syncedAt = new Date().toISOString();
+        setLastSyncAt(syncedAt);
+        window.localStorage.setItem(LAST_SYNC_KEY, syncedAt);
+      } while (syncQueuedRef.current && navigator.onLine);
     } catch (syncError) {
       const message = syncError instanceof Error ? syncError.message : "Fallo la sincronizacion.";
       setError(message);
     } finally {
+      syncActiveRef.current = false;
       setSyncing(false);
     }
   }
@@ -356,40 +473,94 @@ export function DashboardShell() {
     await refreshLocalState();
 
     if (navigator.onLine && session) {
-      void syncNow(session);
+      await syncNow(session);
     }
   }
 
   async function deleteQueuedMember(member: MemberRecord) {
-    await removeMember(member.id);
-    await enqueueOperation({
-      id: crypto.randomUUID(),
-      entityType: "member",
-      entityId: member.id,
-      operationType: "DELETE",
-      payload: { id: member.id, code: member.code },
-      deviceId: getDeviceId(),
-      requestedAt: new Date().toISOString(),
-      queuedAt: new Date().toISOString()
-    });
+    setDeletingMemberId(member.id);
+    setError(null);
+    setDeleteDialog(null);
 
-    await refreshLocalState();
+    try {
+      await removeMember(member.id);
+      await enqueueOperation({
+        id: crypto.randomUUID(),
+        entityType: "member",
+        entityId: member.id,
+        operationType: "DELETE",
+        payload: { id: member.id, code: member.code },
+        deviceId: getDeviceId(),
+        requestedAt: new Date().toISOString(),
+        queuedAt: new Date().toISOString()
+      });
 
-    if (navigator.onLine && session) {
-      void syncNow(session);
+      await refreshLocalState();
+
+      if (navigator.onLine && session) {
+        await syncNow(session);
+      }
+      showToast("success", "Socio eliminado.");
+    } catch (deleteError) {
+      setError(normalizeUiErrorMessage(deleteError, "No se pudo eliminar el socio."));
+      showToast("error", "No se pudo eliminar el socio.");
+      await refreshLocalState();
+    } finally {
+      setDeletingMemberId(null);
     }
   }
 
   useEffect(() => {
-    const storedSession = readSession();
-    setSession(storedSession);
+    let cancelled = false;
+
+    async function buildImages() {
+      if (members.length === 0) {
+        setQrImages({});
+        return;
+      }
+
+      const entries = await Promise.all(
+        members.map(async (member) => {
+          if (!member.code) {
+            return null;
+          }
+
+          try {
+            const image = await QRCode.toDataURL(member.qrToken || buildQrToken(member.code), {
+              margin: 1,
+              width: member.id === currentMember?.id ? 220 : 132
+            });
+            return [member.id, image] as const;
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      const nextImages: Record<string, string> = {};
+      entries.forEach((entry) => {
+        if (entry) {
+          nextImages[entry[0]] = entry[1];
+        }
+      });
+      setQrImages(nextImages);
+    }
+
+    void buildImages();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentMember?.id, members]);
+
+  useEffect(() => {
     setOnline(window.navigator.onLine);
     setLastSyncAt(window.localStorage.getItem(LAST_SYNC_KEY));
     void refreshLocalState();
-
-    if (storedSession && window.navigator.onLine) {
-      void syncNow(storedSession);
-    }
 
     const handleOnline = () => {
       setOnline(true);
@@ -412,19 +583,169 @@ export function DashboardShell() {
     };
   }, []);
 
-  async function handleLogin(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setLoginBusy(true);
-    setError(null);
+  useEffect(() => {
+    if (!scannerMode) {
+      return;
+    }
+
+    scannerLockRef.current = false;
+    setScannerError(null);
+    setScannerReady(false);
+    setScannerStarting(true);
+
+    let cancelled = false;
+
+    async function startScanner() {
+      const video = videoRef.current;
+      if (!video) {
+        setScannerStarting(false);
+        return;
+      }
+
+      try {
+        const isLocalhost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+        if (!window.isSecureContext && !isLocalhost) {
+          setScannerError("Para usar la camara abre la app por HTTPS o desde localhost.");
+          setScannerStarting(false);
+          return;
+        }
+
+        const hasCamera = await QrScanner.hasCamera();
+        if (!hasCamera) {
+          setScannerError("No encontré una camara disponible en este dispositivo.");
+          setScannerStarting(false);
+          return;
+        }
+
+        const scanner = new QrScanner(
+          video,
+          (result) => {
+            const rawValue = typeof result === "string" ? result : result.data;
+            if (!rawValue || scannerLockRef.current) {
+              return;
+            }
+
+            scannerLockRef.current = true;
+            void handleQrDetected(rawValue);
+          },
+          {
+            preferredCamera: "environment",
+            returnDetailedScanResult: true,
+            maxScansPerSecond: 5,
+            highlightScanRegion: true,
+            highlightCodeOutline: true
+          }
+        );
+
+        scannerRef.current = scanner;
+        await scanner.start();
+
+        if (cancelled) {
+          await scanner.stop();
+          scanner.destroy();
+          return;
+        }
+
+        setScannerReady(true);
+      } catch (scannerStartError) {
+        setScannerError(normalizeUiErrorMessage(scannerStartError, "No se pudo abrir la camara para leer el QR."));
+      } finally {
+        if (!cancelled) {
+          setScannerStarting(false);
+        }
+      }
+    }
+
+    void startScanner();
+
+    return () => {
+      cancelled = true;
+
+      if (scannerRef.current) {
+        void scannerRef.current.stop();
+        scannerRef.current.destroy();
+        scannerRef.current = null;
+      }
+
+      setScannerReady(false);
+      setScannerStarting(false);
+      scannerLockRef.current = false;
+    };
+  }, [scannerMode, scannerReloadKey]);
+
+  async function handleQrDetected(rawQr: string) {
+    try {
+      if (scannerMode === "login") {
+        const authenticated = await login(undefined, undefined, rawQr);
+        writeSession(authenticated);
+        setSession(authenticated);
+        setUsername(parseQrMemberCode(rawQr));
+        await syncNow(authenticated);
+        setScannerMode(null);
+        return;
+      }
+
+      const memberCode = parseQrMemberCode(rawQr);
+      const member = members.find(
+        (item) => (item.qrToken || buildQrToken(item.code)) === rawQr || item.code === memberCode
+      );
+
+      if (!member) {
+        throw new Error("No encontré un socio registrado para ese QR.");
+      }
+
+      await handleAttendance(member);
+      setScannerMode(null);
+    } catch (scanError) {
+      setScannerError(normalizeUiErrorMessage(scanError, "No se pudo procesar el QR."));
+    } finally {
+      scannerLockRef.current = false;
+    }
+  }
+
+  async function handleQrImageSelection(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    setScannerError(null);
+    setScannerStarting(true);
 
     try {
-      const authenticated = await login(username, password);
+      const result = await QrScanner.scanImage(file, { returnDetailedScanResult: true });
+      const rawValue = typeof result === "string" ? result : result.data;
+      await handleQrDetected(rawValue);
+    } catch (scanImageError) {
+      setScannerError(normalizeUiErrorMessage(scanImageError, "No se pudo leer el QR de la imagen."));
+    } finally {
+      setScannerStarting(false);
+    }
+  }
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+
+    const nextUsername = loginMode === "member" ? username.trim().toUpperCase() : username.trim();
+    const nextPassword = loginMode === "member" ? nextUsername : password.trim();
+
+    if (!nextUsername || !nextPassword) {
+      setError("Completa los datos para iniciar sesion.");
+      return;
+    }
+
+    setLoginBusy(true);
+
+    try {
+      const authenticated = await login(nextUsername, nextPassword);
       writeSession(authenticated);
       setSession(authenticated);
       await syncNow(authenticated);
     } catch (loginError) {
-      const message = loginError instanceof Error ? loginError.message : "No se pudo iniciar sesion.";
-      setError(message);
+      setError(normalizeUiErrorMessage(loginError, "No se pudo iniciar sesion."));
     } finally {
       setLoginBusy(false);
     }
@@ -432,14 +753,25 @@ export function DashboardShell() {
 
   async function handleSaveMember(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const existing = editingId ? members.find((member) => member.id === editingId) : undefined;
-    const member = toMemberRecord(draft, existing);
+    setError(null);
 
-    await queueMember(member);
-    startTransition(() => {
-      setEditingId(null);
-      setDraft(emptyDraft());
-    });
+    try {
+      const existing = editingId ? members.find((member) => member.id === editingId) : undefined;
+      const wasEditing = Boolean(existing);
+      const member = toMemberRecord(draft, existing);
+
+      await queueMember(member);
+      startTransition(() => {
+        setEditingId(null);
+        setDraft(emptyDraft());
+      });
+      showToast("success", wasEditing ? "Socio actualizado." : "Socio guardado.");
+      return true;
+    } catch (memberError) {
+      setError(normalizeUiErrorMessage(memberError, "No se pudo guardar el socio."));
+      showToast("error", "No se pudo guardar el socio.");
+      return false;
+    }
   }
 
   async function handleAttendance(member: MemberRecord) {
@@ -450,11 +782,13 @@ export function DashboardShell() {
   }
 
   async function handlePayment(member: MemberRecord) {
+    const hasRegisteredPayment = member.pagos.length > 0;
     const baseline = new Date(member.fechaFin).getTime() > Date.now() ? member.fechaFin : new Date().toISOString();
+    const nextFechaFin = hasRegisteredPayment ? addMonthsIso(baseline, 1) : member.fechaFin;
 
     await queueMember({
       ...member,
-      fechaFin: addMonthsIso(baseline, 1),
+      fechaFin: nextFechaFin,
       pagos: [
         {
           id: crypto.randomUUID(),
@@ -487,9 +821,11 @@ export function DashboardShell() {
       await refreshRoutineCatalog(session);
       setEditingRoutineId(null);
       setRoutineDraft(emptyRoutineDraft());
+      showToast("success", editingRoutineId ? "Recomendacion actualizada." : "Recomendacion creada.");
     } catch (routineError) {
       const message = routineError instanceof Error ? routineError.message : "No se pudo guardar la rutina.";
       setError(message);
+      showToast("error", "No se pudo guardar la recomendacion.");
     } finally {
       setRoutineBusy(false);
     }
@@ -510,9 +846,11 @@ export function DashboardShell() {
         setEditingRoutineId(null);
         setRoutineDraft(emptyRoutineDraft());
       }
+      showToast("success", "Recomendacion eliminada.");
     } catch (routineError) {
       const message = routineError instanceof Error ? routineError.message : "No se pudo eliminar la rutina.";
       setError(message);
+      showToast("error", "No se pudo eliminar la recomendacion.");
     } finally {
       setRoutineBusy(false);
     }
@@ -527,10 +865,95 @@ export function DashboardShell() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  const canRetryLogin = !session && typeof error === "string" && /sesion .*venci|vencio/i.test(error);
+
+  const scannerModal = scannerMode ? (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(5, 9, 16, 0.88)", zIndex: 60, display: "grid", placeItems: "center", padding: "24px" }}>
+      <section className="dash-member-card" style={{ width: "min(100%, 28rem)", padding: "20px" }}>
+        <div className="dash-member-card__top">
+          <div>
+            <strong className="dash-member-name">{scannerMode === "login" ? "Entrar con QR" : "Registrar asistencia"}</strong>
+            <span className="dash-member-code">Apunta la cámara al código del socio</span>
+          </div>
+          <button className="dash-action-btn dash-action-btn--outline" onClick={() => setScannerMode(null)} type="button">Cerrar</button>
+        </div>
+        {scannerError ? <p className="dash-error">{scannerError}</p> : null}
+        <video ref={videoRef} autoPlay muted playsInline style={{ width: "100%", borderRadius: "18px", background: "#0b1220", minHeight: "240px", objectFit: "cover" }} />
+        <input accept="image/*" hidden onChange={handleQrImageSelection} ref={scannerImageInputRef} type="file" />
+        <div className="dash-form-actions" style={{ marginTop: "14px" }}>
+          {!scannerReady ? (
+            <button className="dash-action-btn dash-action-btn--primary dash-action-btn--full" disabled={scannerStarting} onClick={() => setScannerReloadKey((current) => current + 1)} type="button">
+              {scannerStarting ? "Pidiendo permiso..." : "Activar camara"}
+            </button>
+          ) : null}
+          <button className="dash-action-btn dash-action-btn--outline dash-action-btn--full" onClick={() => scannerImageInputRef.current?.click()} type="button">
+            Leer desde imagen
+          </button>
+        </div>
+        <p style={{ color: "#a6b3c7", fontSize: "0.92rem", margin: "12px 0 0" }}>
+          {scannerMode === "login" ? "Al abrir la camara, el navegador debe pedir permiso. En otro dispositivo abre https://IP-DE-TU-PC:3443 y acepta el certificado local una vez. Si no deja usarla, sube una imagen del QR o escribe el codigo del socio." : "Al leer el QR se marcara la asistencia del socio. Si la camara falla, puedes subir una imagen del QR."}
+        </p>
+      </section>
+    </div>
+  ) : null;
+
+  const deleteModal = deleteDialog ? (
+    <div className="dash-modal-backdrop" role="presentation" onClick={() => (deletingMemberId ? null : setDeleteDialog(null))}>
+      <section
+        aria-labelledby="delete-member-title"
+        aria-modal="true"
+        className="dash-modal-card"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="dash-modal-card__header">
+          <div>
+            <strong className="dash-member-name" id="delete-member-title">Eliminar socio</strong>
+            <p className="dash-modal-card__subtitle">Confirma el borrado antes de enviarlo al backend para que no vuelva a aparecer al sincronizar.</p>
+          </div>
+          <button className="dash-modal-card__close" disabled={Boolean(deletingMemberId)} onClick={() => setDeleteDialog(null)} type="button">Cerrar</button>
+        </div>
+
+        <div className="dash-delete-summary">
+          <div>
+            <strong>{deleteDialog.name}</strong>
+            <span>{deleteDialog.code}</span>
+          </div>
+          <p>Este socio se eliminara del listado actual y se mandara la operacion de borrado en la siguiente sincronizacion.</p>
+        </div>
+
+        <div className="dash-modal-card__actions">
+          <button className="dash-action-btn dash-action-btn--outline" disabled={Boolean(deletingMemberId)} onClick={() => setDeleteDialog(null)} type="button">Cancelar</button>
+          <button
+            className="dash-action-btn dash-action-btn--danger"
+            disabled={Boolean(deletingMemberId)}
+            onClick={() => {
+              const member = members.find((item) => item.id === deleteDialog.id);
+              if (member) {
+                void deleteQueuedMember(member);
+              }
+            }}
+            type="button"
+          >
+            {deletingMemberId ? "Eliminando..." : "Si, eliminar"}
+          </button>
+        </div>
+      </section>
+    </div>
+  ) : null;
+
+  const toastView = toast ? (
+    <div className="dash-toast-stack">
+      <div className={`dash-toast dash-toast--${toast.kind}`}>{toast.message}</div>
+    </div>
+  ) : null;
+
   if (!session) {
     return (
       <main className="login-shell">
-        <InstallBanner />
+        <InstallBanner compact />
+        {scannerModal}
+        {toastView}
 
         <div className="login-brand">
           <div className="login-logo">
@@ -543,11 +966,16 @@ export function DashboardShell() {
             </svg>
           </div>
           <h1 className="login-title">Force Gym Fitness</h1>
-          <p className="login-subtitle">Panel de Administrador</p>
+          <p className="login-subtitle">{loginMode === "admin" ? "Panel de Administrador" : "Acceso de socios"}</p>
         </div>
 
         <section className="login-card">
           <h2 className="login-card__heading">Iniciar sesión</h2>
+
+          <div className="dash-form-actions" style={{ marginBottom: "16px" }}>
+            <button className={`dash-action-btn ${loginMode === "admin" ? "dash-action-btn--primary" : "dash-action-btn--outline"}`} onClick={() => { setLoginMode("admin"); setUsername(""); setPassword(""); setError(null); setShowPassword(false); }} type="button">Admin</button>
+            <button className={`dash-action-btn ${loginMode === "member" ? "dash-action-btn--primary" : "dash-action-btn--outline"}`} onClick={() => { setLoginMode("member"); setUsername(""); setPassword(""); setError(null); setShowPassword(false); }} type="button">Socio</button>
+          </div>
 
           <form className="login-form" onSubmit={handleLogin}>
             <div className="login-field">
@@ -559,42 +987,65 @@ export function DashboardShell() {
                 autoComplete="username"
                 className="login-field__input"
                 onChange={(event) => setUsername(event.target.value)}
-                placeholder="Código admin"
+                placeholder={loginMode === "admin" ? "Código admin" : "Código de socio"}
                 value={username}
               />
             </div>
 
-            <div className="login-field">
-              <span className="login-field__icon">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>
-              </span>
-              <input
-                autoComplete="current-password"
-                className="login-field__input"
-                onChange={(event) => setPassword(event.target.value)}
-                placeholder="Contraseña"
-                type={showPassword ? "text" : "password"}
-                value={password}
-              />
-              <button
-                className="login-field__toggle"
-                onClick={() => setShowPassword(!showPassword)}
-                tabIndex={-1}
-                type="button"
-              >
-                {showPassword ? (
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-                ) : (
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>
-                )}
-              </button>
-            </div>
+            {loginMode === "admin" ? (
+              <div className="login-field">
+                <span className="login-field__icon">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>
+                </span>
+                <input
+                  autoComplete="current-password"
+                  className="login-field__input"
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="Contraseña"
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                />
+                <button
+                  className="login-field__toggle"
+                  onClick={() => setShowPassword(!showPassword)}
+                  tabIndex={-1}
+                  type="button"
+                >
+                  {showPassword ? (
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>
+                  )}
+                </button>
+              </div>
+            ) : null}
 
             {error ? <p className="login-error">{error}</p> : null}
+
+            {canRetryLogin ? (
+              <button
+                className="login-retry-btn"
+                onClick={() => {
+                  setUsername("");
+                  setPassword("");
+                  setShowPassword(false);
+                  setError(null);
+                }}
+                type="button"
+              >
+                Volver a iniciar sesion
+              </button>
+            ) : null}
 
             <button className="login-btn" disabled={loginBusy} type="submit">
               {loginBusy ? "CONECTANDO..." : "INICIAR SESIÓN"}
             </button>
+
+            {loginMode === "member" ? (
+              <button className="dash-action-btn dash-action-btn--outline dash-action-btn--full" onClick={() => setScannerMode("login")} type="button">
+                Entrar con QR
+              </button>
+            ) : null}
 
             <button
               className="login-link"
@@ -604,20 +1055,25 @@ export function DashboardShell() {
                   setError("Todavia no hay una sesion guardada para usar sin conexion.");
                   return;
                 }
+
+                if (navigator.onLine && isSessionExpired(storedSession)) {
+                  writeSession(null);
+                  setError("La sesion guardada ya vencio. Inicia sesion otra vez.");
+                  return;
+                }
+
                 setSession(storedSession);
                 setError(null);
               }}
               type="button"
             >
-              Acceso de miembro
+              Usar sesión guardada
             </button>
           </form>
         </section>
 
         <div className="login-sync-status">
-          {error ? (
-            <span className="login-sync-pill login-sync-pill--error">No se pudo sincronizar</span>
-          ) : syncing ? (
+          {syncing ? (
             <span className="login-sync-pill login-sync-pill--busy">Sincronizando...</span>
           ) : null}
         </div>
@@ -633,11 +1089,107 @@ export function DashboardShell() {
     </button>
   );
 
+  if (isMemberSession) {
+    return (
+      <main className="dash-shell">
+        <InstallBanner compact />
+        {scannerModal}
+        <header className="dash-header">
+          <div className="dash-header__brand">
+            <div className="dash-header__logo">
+              <svg viewBox="0 0 64 64" width="26" height="26" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="6" y="24" width="8" height="16" rx="2" fill="#e74c3c"/>
+                <rect x="50" y="24" width="8" height="16" rx="2" fill="#e74c3c"/>
+                <rect x="14" y="20" width="6" height="24" rx="2" fill="#e74c3c"/>
+                <rect x="44" y="20" width="6" height="24" rx="2" fill="#e74c3c"/>
+                <rect x="20" y="28" width="24" height="8" rx="2" fill="#e74c3c"/>
+              </svg>
+            </div>
+            <div>
+              <p className="dash-header__name">Force Gym Fitness</p>
+              <p className="dash-header__role">Socio</p>
+            </div>
+          </div>
+          <button
+            className="dash-logout"
+            onClick={() => { writeSession(null); setSession(null); setTenantMeta(null); setError(null); }}
+            title="Cerrar sesión"
+            type="button"
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          </button>
+        </header>
+
+        {error ? <p className="dash-error">{error}</p> : null}
+
+        <section className="dash-section">
+          <h2 className="dash-section-title">Mi membresía</h2>
+          {!currentMember ? (
+            <p className="dash-empty">Cargando tu información...</p>
+          ) : (
+            <div className="dash-member-list">
+              <article className="dash-member-card">
+                <div className="dash-member-card__top">
+                  <div>
+                    <strong className="dash-member-name">{memberFullName(currentMember)}</strong>
+                    <span className="dash-member-code">{currentMember.code}</span>
+                  </div>
+                  <span className={`dash-badge ${isMemberActive(currentMember) ? "dash-badge--green" : "dash-badge--red"}`}>
+                    {isMemberActive(currentMember) ? "Activo" : "Vencido"}
+                  </span>
+                </div>
+                <dl className="dash-member-meta">
+                  <div><dt>Vence</dt><dd>{formatDateLabel(currentMember.fechaFin)}</dd></div>
+                  <div><dt>Restan</dt><dd>{getDaysRemaining(currentMember)} días</dd></div>
+                </dl>
+                {qrImages[currentMember.id] ? (
+                  <div style={{ marginTop: "16px", textAlign: "center" }}>
+                    <img alt={`QR ${currentMember.code}`} src={qrImages[currentMember.id]} style={{ width: "220px", maxWidth: "100%", borderRadius: "18px", background: "#fff", padding: "10px" }} />
+                    <p style={{ color: "#a6b3c7", fontSize: "0.92rem", margin: "10px 0 0" }}>Usa este QR para ingresar al gimnasio o iniciar sesión.</p>
+                  </div>
+                ) : null}
+              </article>
+
+              <article className="dash-member-card">
+                <div className="dash-member-card__top">
+                  <div>
+                    <strong className="dash-member-name">Consejos del gym</strong>
+                    <span className="dash-member-code">{routineCatalog.length} recomendacion{routineCatalog.length === 1 ? "" : "es"}</span>
+                  </div>
+                  {routineCatalog.length > 0 ? <span className="dash-badge dash-badge--blue">Actualizado</span> : null}
+                </div>
+                {routineCatalog.length > 0 ? (
+                  <div style={{ display: "grid", gap: "14px", marginTop: "12px" }}>
+                    {routineCatalog.map((routine) => (
+                      <div key={routine.id} style={{ padding: "14px", borderRadius: "16px", background: "rgba(255,255,255,0.04)" }}>
+                        <p style={{ color: "#d5deed", margin: 0, fontWeight: 700 }}>{routine.name}</p>
+                        <p style={{ color: "#a6b3c7", fontSize: "0.92rem", margin: "8px 0 0" }}>{routine.objective || routine.notes || "Consejo general del gym."}</p>
+                        {routine.exercises.length > 0 ? (
+                          <ul style={{ margin: "12px 0 0", paddingLeft: "18px", color: "#dfe7f2" }}>
+                            {routine.exercises.map((exercise) => <li key={`${routine.id}-${exercise}`}>{exercise}</li>)}
+                          </ul>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="dash-empty">Todavía no hay recomendaciones cargadas.</p>
+                )}
+              </article>
+            </div>
+          )}
+        </section>
+      </main>
+    );
+  }
+
   /* ── MEMBERS list view ── */
   if (view === "members") {
     return (
       <main className="dash-shell">
-        <InstallBanner />
+        <InstallBanner compact />
+        {deleteModal}
+        {toastView}
         <header className="dash-topbar">
           <BackBtn />
           <div className="dash-topbar__right">
@@ -676,11 +1228,16 @@ export function DashboardShell() {
                   <div><dt>Restan</dt><dd>{getDaysRemaining(member)} días</dd></div>
                   <div><dt>Pagos</dt><dd>{member.pagos.length}</dd></div>
                 </dl>
+                {qrImages[member.id] ? (
+                  <div style={{ marginTop: "14px", textAlign: "center" }}>
+                    <img alt={`QR ${member.code}`} src={qrImages[member.id]} style={{ width: "132px", maxWidth: "100%", borderRadius: "14px", background: "#fff", padding: "8px" }} />
+                  </div>
+                ) : null}
                 <div className="dash-member-actions">
                   <button className="dash-action-btn dash-action-btn--outline" onClick={() => void handleAttendance(member)} type="button">Asistencia</button>
                   <button className="dash-action-btn dash-action-btn--primary" onClick={() => void handlePayment(member)} type="button">Cobrar</button>
                   <button className="dash-action-btn dash-action-btn--outline" onClick={() => { setEditingId(member.id); setDraft(toDraft(member)); navigate("register"); }} type="button">Editar</button>
-                  <button className="dash-action-btn dash-action-btn--danger" onClick={() => void deleteQueuedMember(member)} type="button">Eliminar</button>
+                  <button className="dash-action-btn dash-action-btn--danger" disabled={deletingMemberId === member.id} onClick={() => setDeleteDialog({ id: member.id, code: member.code, name: memberFullName(member) })} type="button">{deletingMemberId === member.id ? "Eliminando..." : "Eliminar"}</button>
                 </div>
               </article>
             ))}
@@ -694,18 +1251,24 @@ export function DashboardShell() {
   if (view === "register") {
     return (
       <main className="dash-shell">
-        <InstallBanner />
+        <InstallBanner compact />
+        {toastView}
         <header className="dash-topbar">
           <BackBtn />
         </header>
         <section className="dash-section">
           <h2 className="dash-section-title">{editingId ? "Editar miembro" : "Registrar miembro"}</h2>
           {error ? <p className="dash-error">{error}</p> : null}
-          <form className="dash-form" onSubmit={async (e) => { await handleSaveMember(e); navigate("members"); }}>
+          <form className="dash-form" onSubmit={async (e) => {
+            const saved = await handleSaveMember(e);
+            if (saved) {
+              navigate("members");
+            }
+          }}>
             <div className="dash-form-grid">
               <label className="dash-field">
                 <span>Código</span>
-                <input onChange={(event) => setDraft((c) => ({ ...c, code: event.target.value }))} required value={draft.code} />
+                <input placeholder="Se genera automáticamente" readOnly value={draft.code} />
               </label>
               <label className="dash-field">
                 <span>Nombre</span>
@@ -718,10 +1281,6 @@ export function DashboardShell() {
               <label className="dash-field">
                 <span>Teléfono</span>
                 <input onChange={(event) => setDraft((c) => ({ ...c, telefono: event.target.value }))} value={draft.telefono} />
-              </label>
-              <label className="dash-field">
-                <span>Clave del socio</span>
-                <input onChange={(event) => setDraft((c) => ({ ...c, password: event.target.value }))} value={draft.password} />
               </label>
               <label className="dash-field">
                 <span>Fecha inicio</span>
@@ -750,7 +1309,8 @@ export function DashboardShell() {
   if (view === "expirations") {
     return (
       <main className="dash-shell">
-        <InstallBanner />
+        <InstallBanner compact />
+        {toastView}
         <header className="dash-topbar"><BackBtn /></header>
         <section className="dash-section">
           <h2 className="dash-section-title">Vencimientos</h2>
@@ -789,7 +1349,8 @@ export function DashboardShell() {
   if (view === "stats") {
     return (
       <main className="dash-shell">
-        <InstallBanner />
+        <InstallBanner compact />
+        {toastView}
         <header className="dash-topbar"><BackBtn /></header>
         <section className="dash-section">
           <h2 className="dash-section-title">Estadísticas</h2>
@@ -808,7 +1369,7 @@ export function DashboardShell() {
             </article>
             <article className="dash-kpi-card">
               <div className="dash-kpi-icon dash-kpi-icon--purple"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></div>
-              <div><p className="dash-kpi-label">Rutinas</p><strong className="dash-kpi-value">{routineCatalog.length}</strong></div>
+              <div><p className="dash-kpi-label">Recomendaciones</p><strong className="dash-kpi-value">{routineCatalog.length}</strong></div>
             </article>
           </div>
           <h3 className="dash-subsection-title">Últimos pagos</h3>
@@ -830,36 +1391,40 @@ export function DashboardShell() {
   if (view === "routines") {
     return (
       <main className="dash-shell">
-        <InstallBanner />
+        <InstallBanner compact />
+        {toastView}
         <header className="dash-topbar"><BackBtn /></header>
         <section className="dash-section">
-          <h2 className="dash-section-title">Rutinas</h2>
+          <h2 className="dash-section-title">Recomendaciones del gym</h2>
           {error ? <p className="dash-error">{error}</p> : null}
           <form className="dash-form" onSubmit={handleSaveRoutine}>
             <div className="dash-form-grid">
               <label className="dash-field"><span>Código</span><input onChange={(e) => setRoutineDraft((c) => ({ ...c, code: e.target.value }))} required value={routineDraft.code} /></label>
-              <label className="dash-field"><span>Nombre</span><input onChange={(e) => setRoutineDraft((c) => ({ ...c, name: e.target.value }))} required value={routineDraft.name} /></label>
-              <label className="dash-field"><span>Nivel</span><input onChange={(e) => setRoutineDraft((c) => ({ ...c, level: e.target.value }))} required value={routineDraft.level} /></label>
-              <label className="dash-field"><span>Días/semana</span><input max="7" min="1" onChange={(e) => setRoutineDraft((c) => ({ ...c, daysPerWeek: e.target.value }))} required type="number" value={routineDraft.daysPerWeek} /></label>
-              <label className="dash-field"><span>Duración (min)</span><input min="10" onChange={(e) => setRoutineDraft((c) => ({ ...c, durationMinutes: e.target.value }))} required type="number" value={routineDraft.durationMinutes} /></label>
-              <label className="dash-field"><span>Objetivo</span><input onChange={(e) => setRoutineDraft((c) => ({ ...c, objective: e.target.value }))} value={routineDraft.objective} /></label>
+              <label className="dash-field"><span>Título</span><input onChange={(e) => setRoutineDraft((c) => ({ ...c, name: e.target.value }))} required value={routineDraft.name} /></label>
+              <label className="dash-field"><span>Enfoque</span><input onChange={(e) => setRoutineDraft((c) => ({ ...c, objective: e.target.value }))} placeholder="Ejemplo: postura, alimentación, constancia" value={routineDraft.objective} /></label>
             </div>
-            <label className="dash-field"><span>Notas</span><textarea onChange={(e) => setRoutineDraft((c) => ({ ...c, notes: e.target.value }))} value={routineDraft.notes} /></label>
-            <label className="dash-field"><span>Ejercicios</span><textarea onChange={(e) => setRoutineDraft((c) => ({ ...c, exercises: e.target.value }))} placeholder="Una línea por ejercicio" value={routineDraft.exercises} /></label>
+            <label className="dash-field"><span>Mensaje principal</span><textarea onChange={(e) => setRoutineDraft((c) => ({ ...c, notes: e.target.value }))} value={routineDraft.notes} /></label>
+            <label className="dash-field"><span>Recomendaciones</span><textarea onChange={(e) => setRoutineDraft((c) => ({ ...c, exercises: e.target.value }))} placeholder="Una línea por recomendación" value={routineDraft.exercises} /></label>
             <div className="dash-form-actions">
-              <button className="dash-action-btn dash-action-btn--primary" disabled={routineBusy} type="submit">{routineBusy ? "Guardando..." : editingRoutineId ? "Actualizar" : "Crear rutina"}</button>
+              <button className="dash-action-btn dash-action-btn--primary" disabled={routineBusy} type="submit">{routineBusy ? "Guardando..." : editingRoutineId ? "Actualizar" : "Crear recomendación"}</button>
               <button className="dash-action-btn dash-action-btn--outline" onClick={() => { setEditingRoutineId(null); setRoutineDraft(emptyRoutineDraft()); }} type="button">Limpiar</button>
             </div>
           </form>
           <div className="dash-member-list">
-            {routineCatalog.length === 0 ? <p className="dash-empty">Sin rutinas cargadas.</p> : null}
+            {routineCatalog.length === 0 ? <p className="dash-empty">Sin recomendaciones cargadas.</p> : null}
             {routineCatalog.map((routine) => (
               <article className="dash-member-card" key={routine.id}>
                 <div className="dash-member-card__top">
-                  <div><strong className="dash-member-name">{routine.name}</strong><span className="dash-member-code">{routine.code} · {routine.level}</span></div>
-                  <span className="dash-badge dash-badge--blue">{routine.daysPerWeek} días</span>
+                  <div><strong className="dash-member-name">{routine.name}</strong><span className="dash-member-code">{routine.code}</span></div>
+                  <span className="dash-badge dash-badge--blue">Consejo</span>
                 </div>
-                <p style={{ color: "#aaa", fontSize: "0.88rem", margin: "8px 0 0" }}>{routine.objective || routine.notes || "Sin descripción."}</p>
+                <p style={{ color: "#d5deed", margin: "8px 0 0" }}>{routine.objective || "Recomendación general"}</p>
+                <p style={{ color: "#aaa", fontSize: "0.88rem", margin: "8px 0 0" }}>{routine.notes || "Sin descripción."}</p>
+                {routine.exercises.length > 0 ? (
+                  <ul style={{ margin: "12px 0 0", paddingLeft: "18px", color: "#dfe7f2" }}>
+                    {routine.exercises.map((exercise) => <li key={`${routine.id}-${exercise}`}>{exercise}</li>)}
+                  </ul>
+                ) : null}
                 <div className="dash-member-actions">
                   <button className="dash-action-btn dash-action-btn--outline" onClick={() => { setEditingRoutineId(routine.id); setRoutineDraft(toRoutineDraft(routine)); }} type="button">Editar</button>
                   <button className="dash-action-btn dash-action-btn--danger" onClick={() => void handleDeleteRoutine(routine.id)} type="button">Eliminar</button>
@@ -875,7 +1440,9 @@ export function DashboardShell() {
   /* ── HOME dashboard (main screen matching screenshot) ── */
   return (
     <main className="dash-shell">
-      <InstallBanner />
+      <InstallBanner compact />
+      {scannerModal}
+      {toastView}
 
       {/* Top bar */}
       <header className="dash-header">
@@ -999,7 +1566,7 @@ export function DashboardShell() {
             <span>Vencimientos</span>
           </button>
 
-          <button className="dash-action-tile" onClick={() => void 0} type="button">
+          <button className="dash-action-tile" onClick={() => setScannerMode("attendance")} type="button">
             <div className="dash-action-tile__icon dash-action-tile__icon--purple">
               <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
             </div>
@@ -1017,7 +1584,7 @@ export function DashboardShell() {
             <div className="dash-action-tile__icon dash-action-tile__icon--teal">
               <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
             </div>
-            <span>Rutinas</span>
+            <span>Consejos</span>
           </button>
         </div>
 

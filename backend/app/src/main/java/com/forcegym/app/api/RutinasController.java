@@ -7,6 +7,7 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.security.core.Authentication;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -17,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/rutinas")
@@ -29,27 +31,45 @@ public class RutinasController {
   }
 
   @GetMapping("/catalog")
-  public List<RoutineCatalogItem> catalog() {
+  public List<RoutineCatalogItem> catalog(Authentication authentication) {
+    if (isMember(authentication)) {
+      return rutinaCatalogService.listCatalogForMember(authentication.getName());
+    }
     return rutinaCatalogService.listCatalog();
   }
 
   @PostMapping("/catalog")
   @ResponseStatus(HttpStatus.CREATED)
-  public RoutineCatalogItem create(@Valid @RequestBody UpsertRoutineRequest request) {
+  public RoutineCatalogItem create(@Valid @RequestBody UpsertRoutineRequest request, Authentication authentication) {
+    rejectMemberWrite(authentication);
     return rutinaCatalogService.create(request);
   }
 
   @PutMapping("/catalog/{routineId}")
   public RoutineCatalogItem update(
       @PathVariable UUID routineId,
-      @Valid @RequestBody UpsertRoutineRequest request) {
+      @Valid @RequestBody UpsertRoutineRequest request,
+      Authentication authentication) {
+    rejectMemberWrite(authentication);
     return rutinaCatalogService.update(routineId, request);
   }
 
   @DeleteMapping("/catalog/{routineId}")
   @ResponseStatus(HttpStatus.NO_CONTENT)
-  public void delete(@PathVariable UUID routineId) {
+  public void delete(@PathVariable UUID routineId, Authentication authentication) {
+    rejectMemberWrite(authentication);
     rutinaCatalogService.delete(routineId);
+  }
+
+  private boolean isMember(Authentication authentication) {
+    return authentication != null
+        && authentication.getAuthorities().stream().anyMatch(a -> "ROLE_MEMBER".equals(a.getAuthority()));
+  }
+
+  private void rejectMemberWrite(Authentication authentication) {
+    if (isMember(authentication)) {
+      throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Los socios no pueden modificar rutinas.");
+    }
   }
 
   public record RoutineCatalogItem(

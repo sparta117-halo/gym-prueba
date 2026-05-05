@@ -1,14 +1,39 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: force-gym-monolith-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: forcegym_next
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: tilin
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/postgresql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d forcegym_next"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   app:
     build:
       context: .
-      dockerfile: Dockerfile.render
+      dockerfile: Dockerfile
     container_name: force-gym-app
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://roundhouse.proxy.rlwy.net:34284/railway
-      SPRING_DATASOURCE_USERNAME: postgres
-      SPRING_DATASOURCE_PASSWORD: WRXGrpzusamYUjVRHDbTEQuBdcCRCjGY
-      FORCE_GYM_JWT_SECRET: "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:-jdbc:postgresql://postgres:5432/forcegym_next}
+      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD:-tilin}
+      FORCE_GYM_JWT_SECRET: ${FORCE_GYM_JWT_SECRET:-0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF}
+
+volumes:
+  postgres_data:

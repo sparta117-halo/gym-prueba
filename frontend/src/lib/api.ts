@@ -13,6 +13,30 @@ import type {
 
 const API_BASE_KEY = "force_gym.api_base.v1";
 
+function normalizeErrorMessage(detail: string, fallback: string) {
+  try {
+    const parsed = JSON.parse(detail) as { message?: string; error?: string; status?: number };
+    if (typeof parsed.message === "string" && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+    if (parsed.status === 401 || parsed.error === "Unauthorized") {
+      return fallback;
+    }
+  } catch {
+  }
+
+  const cleaned = detail.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return fallback;
+  }
+
+  if (cleaned.length > 180 || /<!doctype|<html|exception|trace|stack/i.test(detail)) {
+    return fallback;
+  }
+
+  return cleaned;
+}
+
 function normalizeApiBase(value: string | null | undefined) {
   if (!value) {
     return null;
@@ -78,9 +102,9 @@ async function requestJson<T>(path: string, init: RequestInit = {}, session?: Au
     });
 
     if (!response.ok) {
-      const fallback = response.status === 401 ? "Credenciales invalidas." : "No se pudo completar la solicitud.";
+      const fallback = response.status === 401 ? "Codigo o contrasena incorrectos." : "No se pudo completar la solicitud.";
       const detail = await response.text();
-      throw new Error(detail || fallback);
+      throw new Error(normalizeErrorMessage(detail, fallback));
     }
 
     if (response.status === 204) {
@@ -94,10 +118,10 @@ async function requestJson<T>(path: string, init: RequestInit = {}, session?: Au
   }
 }
 
-export function login(username: string, password: string) {
+export function login(username?: string, password?: string, qrCode?: string) {
   return requestJson<AuthSession>("/gateway/auth/login", {
     method: "POST",
-    body: JSON.stringify({ username, password })
+    body: JSON.stringify({ username, password, qrCode })
   });
 }
 

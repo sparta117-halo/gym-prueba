@@ -1,14 +1,13 @@
 services:
   - type: web
-    name: force-gym-api
+    name: force-gym-monolith
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: free
     envVars:
       - key: SPRING_DATASOURCE_URL
-        value: jdbc:postgresql://roundhouse.proxy.rlwy.net:34284/railway
+        sync: false
       - key: SPRING_DATASOURCE_USERNAME
-        value: postgres
+        sync: false
       - key: SPRING_DATASOURCE_PASSWORD
         sync: false
       - key: FORCE_GYM_JWT_SECRET

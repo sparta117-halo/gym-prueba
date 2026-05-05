@@ -26,7 +26,7 @@ export type ProgressRecord = {
 export type MemberRecord = {
   id: string;
   code: string;
-  password: string;
+  password?: string;
   nombre: string;
   apellido: string;
   telefono: string;
@@ -34,6 +34,8 @@ export type MemberRecord = {
   fechaFin: string;
   meses: number;
   diaPago: number;
+  routineCode?: string;
+  qrToken?: string;
   asistencias: string[];
   pagos: PaymentRecord[];
   progreso: ProgressRecord[];

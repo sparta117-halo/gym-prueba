@@ -12,15 +12,22 @@ import com.forcegym.membresia.api.MembresiaSyncController.PushSyncRequest;
 import com.forcegym.membresia.api.MembresiaSyncController.PushSyncResponse;
 import com.forcegym.membresia.api.MembresiaSyncController.SyncCursor;
 import com.forcegym.membresia.api.MembresiaSyncController.SyncOperation;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.UUID;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class MembresiaSyncService {
@@ -35,7 +42,7 @@ public class MembresiaSyncService {
     this.objectMapper = objectMapper;
   }
 
-  public BootstrapResponse bootstrap() {
+  public BootstrapResponse bootstrap(String requestedUsername, boolean memberScope) {
     final BootstrapMeta meta = jdbcTemplate.query(
         """
             select t.id::text as tenant_id, b.id::text as branch_id
@@ -48,102 +55,156 @@ public class MembresiaSyncService {
             ? new BootstrapMeta(rs.getString("tenant_id"), rs.getString("branch_id"), Instant.now().toString())
             : new BootstrapMeta("default-tenant", "default-branch", Instant.now().toString()));
 
-    final List<MemberSummary> members = jdbcTemplate.query(
-        """
-            select
-              m.id::text as id,
-              m.member_code,
-              m.status,
-              m.ends_at,
-              m.snapshot_jsonb::text as snapshot
-            from memberships m
-            order by m.ends_at asc
-            limit 50
-            """,
-        (rs, rowNum) -> {
-          final Map<String, Object> snapshot = readMap(rs.getString("snapshot"));
-          return new MemberSummary(
-              rs.getString("id"),
-              rs.getString("member_code"),
-              stringValue(snapshot.get("nombre"), "Miembro"),
-              stringValue(snapshot.get("apellido"), "Demo"),
-              rs.getString("status"),
-              rs.getObject("ends_at", java.time.OffsetDateTime.class).toInstant().toString());
-        });
+    final String memberCodeFilter = memberScope ? requireMemberCode(requestedUsername) : null;
 
-    final List<PaymentSummary> payments = jdbcTemplate.query(
-        """
-            select
-              p.id::text as id,
-              p.membership_id::text as membership_id,
-              p.amount,
-              p.paid_at
-            from payments p
-            order by p.paid_at desc
-            limit 100
-            """,
-        (rs, rowNum) -> new PaymentSummary(
-            rs.getString("id"),
-            rs.getString("membership_id"),
-            rs.getBigDecimal("amount").doubleValue(),
-            rs.getObject("paid_at", java.time.OffsetDateTime.class).toInstant().toString()));
+    final List<MemberSummary> members = memberScope
+        ? jdbcTemplate.query(
+            """
+                select
+                  m.id::text as id,
+                  m.member_code,
+                  m.status,
+                  m.ends_at,
+                  m.snapshot_jsonb::text as snapshot
+                from memberships m
+                where m.member_code = ?
+                order by m.ends_at asc
+                limit 50
+                """,
+            (rs, rowNum) -> toMemberSummary(
+                rs.getString("id"),
+                rs.getString("member_code"),
+                rs.getString("status"),
+                rs.getObject("ends_at", OffsetDateTime.class),
+                rs.getString("snapshot")),
+            memberCodeFilter)
+        : jdbcTemplate.query(
+            """
+                select
+                  m.id::text as id,
+                  m.member_code,
+                  m.status,
+                  m.ends_at,
+                  m.snapshot_jsonb::text as snapshot
+                from memberships m
+                order by m.ends_at asc
+                limit 50
+                """,
+            (rs, rowNum) -> toMemberSummary(
+                rs.getString("id"),
+                rs.getString("member_code"),
+                rs.getString("status"),
+                rs.getObject("ends_at", OffsetDateTime.class),
+                rs.getString("snapshot")));
 
-    final List<AttendanceSummary> attendances = jdbcTemplate.query(
-        """
-            select
-              a.id::text as id,
-              a.membership_id::text as membership_id,
-              a.occurred_at
-            from attendance_events a
-            order by a.occurred_at desc
-            limit 100
-            """,
-        (rs, rowNum) -> new AttendanceSummary(
-            rs.getString("id"),
-            rs.getString("membership_id"),
-            rs.getObject("occurred_at", java.time.OffsetDateTime.class).toInstant().toString()));
+    final List<PaymentSummary> payments = memberScope
+        ? jdbcTemplate.query(
+            """
+                select
+                  p.id::text as id,
+                  p.membership_id::text as membership_id,
+                  p.amount,
+                  p.paid_at
+                from payments p
+                join memberships m on m.id = p.membership_id
+                where m.member_code = ?
+                order by p.paid_at desc
+                limit 100
+                """,
+            (rs, rowNum) -> toPaymentSummary(
+                rs.getString("id"),
+                rs.getString("membership_id"),
+                rs.getBigDecimal("amount").doubleValue(),
+                rs.getObject("paid_at", OffsetDateTime.class)),
+            memberCodeFilter)
+        : jdbcTemplate.query(
+            """
+                select
+                  p.id::text as id,
+                  p.membership_id::text as membership_id,
+                  p.amount,
+                  p.paid_at
+                from payments p
+                order by p.paid_at desc
+                limit 100
+                """,
+            (rs, rowNum) -> toPaymentSummary(
+                rs.getString("id"),
+                rs.getString("membership_id"),
+                rs.getBigDecimal("amount").doubleValue(),
+                rs.getObject("paid_at", OffsetDateTime.class)));
+
+    final List<AttendanceSummary> attendances = memberScope
+        ? jdbcTemplate.query(
+            """
+                select
+                  a.id::text as id,
+                  a.membership_id::text as membership_id,
+                  a.occurred_at
+                from attendance_events a
+                join memberships m on m.id = a.membership_id
+                where m.member_code = ?
+                order by a.occurred_at desc
+                limit 100
+                """,
+            (rs, rowNum) -> toAttendanceSummary(
+                rs.getString("id"),
+                rs.getString("membership_id"),
+                rs.getObject("occurred_at", OffsetDateTime.class)),
+            memberCodeFilter)
+        : jdbcTemplate.query(
+            """
+                select
+                  a.id::text as id,
+                  a.membership_id::text as membership_id,
+                  a.occurred_at
+                from attendance_events a
+                order by a.occurred_at desc
+                limit 100
+                """,
+            (rs, rowNum) -> toAttendanceSummary(
+                rs.getString("id"),
+                rs.getString("membership_id"),
+                rs.getObject("occurred_at", OffsetDateTime.class)));
 
     return new BootstrapResponse(meta, members, payments, attendances);
   }
 
-  public PullSyncResponse pull() {
+  public PullSyncResponse pull(String requestedUsername, boolean memberScope) {
     final List<Map<String, Object>> upserts = new ArrayList<>();
+    final String memberCodeFilter = memberScope ? requireMemberCode(requestedUsername) : null;
 
-    jdbcTemplate.query(
-        """
-            select
-              m.id::text as id,
-              m.member_code,
-              m.status,
-              m.ends_at,
-              m.snapshot_jsonb::text as snapshot
-            from memberships m
-            order by m.updated_at desc
-            limit 50
-            """,
-        rs -> {
-          final Map<String, Object> snapshot = readMap(rs.getString("snapshot"));
-          final Map<String, Object> payload = new LinkedHashMap<>();
-          payload.put("id", rs.getString("id"));
-          payload.put("code", rs.getString("member_code"));
-          payload.put("nombre", stringValue(snapshot.get("nombre"), "Miembro"));
-          payload.put("apellido", stringValue(snapshot.get("apellido"), "Demo"));
-          payload.put("telefono", stringValue(snapshot.get("telefono"), ""));
-          payload.put("password", stringValue(snapshot.get("password"), "123456"));
-          payload.put("fechaInicio", stringValue(snapshot.get("fechaInicio"), Instant.now().toString()));
-          payload.put("fechaFin", rs.getObject("ends_at", java.time.OffsetDateTime.class).toInstant().toString());
-          payload.put("meses", intValue(snapshot.get("meses"), 1));
-          payload.put("diaPago", intValue(snapshot.get("diaPago"), 1));
-          payload.put("asistencias", listValue(snapshot.get("asistencias")));
-          payload.put("pagos", listValue(snapshot.get("pagos")));
-          payload.put("progreso", listValue(snapshot.get("progreso")));
-
-          upserts.add(Map.of(
-              "entityType", "member",
-              "entityId", rs.getString("id"),
-              "operationType", "UPSERT",
-              "payload", payload));
-        });
+    if (memberScope) {
+      jdbcTemplate.query(
+          """
+              select
+                m.id::text as id,
+                m.member_code,
+                m.status,
+                m.ends_at,
+                m.snapshot_jsonb::text as snapshot
+              from memberships m
+              where m.member_code = ?
+              order by m.updated_at desc
+              limit 50
+              """,
+          (RowCallbackHandler) rs -> upserts.add(toMemberUpsert(rs)),
+          memberCodeFilter);
+    } else {
+      jdbcTemplate.query(
+          """
+              select
+                m.id::text as id,
+                m.member_code,
+                m.status,
+                m.ends_at,
+                m.snapshot_jsonb::text as snapshot
+              from memberships m
+              order by m.updated_at desc
+              limit 50
+              """,
+              (RowCallbackHandler) rs -> upserts.add(toMemberUpsert(rs)));
+    }
 
     return new PullSyncResponse(
         new SyncCursor("membresia", Instant.now().toString()),
@@ -153,7 +214,11 @@ public class MembresiaSyncService {
         List.of());
   }
 
-  public PushSyncResponse push(PushSyncRequest request) {
+  public PushSyncResponse push(PushSyncRequest request, String requestedUsername, boolean memberScope) {
+    if (memberScope) {
+      throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Los socios no pueden modificar membresias.");
+    }
+
     int accepted = 0;
     for (SyncOperation operation : request.operations()) {
       final UUID tenantId = defaultTenantId();
@@ -227,18 +292,24 @@ public class MembresiaSyncService {
   }
 
   private void upsertMembership(UUID tenantId, UUID branchId, Map<String, Object> payload) {
-    final String memberCode = stringValue(payload.get("code"), null);
+    final UUID existingMembershipId = resolveMembershipId(tenantId, payload);
+    final String memberCode = resolveMemberCode(tenantId, existingMembershipId, payload);
     if (memberCode == null || memberCode.isBlank()) {
       return;
     }
 
+    payload.put("code", memberCode);
+    payload.put("password", memberCode);
+    payload.put("qrToken", qrTokenFor(memberCode));
+
     final UUID memberUserId = ensureMemberUser(tenantId, branchId, payload, memberCode);
-    final UUID membershipId = existingMembershipId(tenantId, memberCode);
+    final UUID membershipId = existingMembershipId != null ? existingMembershipId : existingMembershipId(tenantId, memberCode);
     final UUID planId = defaultPlanId(tenantId, branchId);
     final OffsetDateTime startsAt = parseTimestamp(payload.get("fechaInicio"), OffsetDateTime.now());
     final OffsetDateTime endsAt = parseTimestamp(payload.get("fechaFin"), startsAt.plusMonths(1));
     final int billingDay = intValue(payload.get("diaPago"), startsAt.getDayOfMonth());
     final String status = endsAt.isAfter(OffsetDateTime.now()) ? "active" : "expired";
+    payload.put("fechaFin", endsAt.toInstant().toString());
     final String snapshotJson = writeJson(payload);
 
     if (membershipId == null) {
@@ -339,7 +410,7 @@ public class MembresiaSyncService {
   private UUID ensureMemberUser(UUID tenantId, UUID branchId, Map<String, Object> payload, String memberCode) {
     final String username = memberCode;
     final String phone = stringValue(payload.get("telefono"), "");
-    final String password = stringValue(payload.get("password"), memberCode);
+    final String password = memberCode;
     final String profileJson = writeJson(Map.of(
         "nombre", stringValue(payload.get("nombre"), ""),
         "apellido", stringValue(payload.get("apellido"), "")));
@@ -373,6 +444,7 @@ public class MembresiaSyncService {
           password,
           profileJson,
           existingId);
+      ensureMemberRole(existingId);
       return existingId;
     }
 
@@ -399,7 +471,22 @@ public class MembresiaSyncService {
         username,
         password,
         profileJson);
+    ensureMemberRole(userId);
     return userId;
+  }
+
+  private void ensureMemberRole(UUID userId) {
+    final UUID memberRoleId = jdbcTemplate.query(
+        "select id from roles where code = 'MEMBER' limit 1",
+        rs -> rs.next() ? rs.getObject("id", UUID.class) : null);
+    if (memberRoleId == null) {
+      return;
+    }
+
+    jdbcTemplate.update(
+        "insert into user_roles (user_id, role_id) values (?, ?) on conflict do nothing",
+        userId,
+        memberRoleId);
   }
 
   private void replacePayments(UUID tenantId, UUID branchId, UUID membershipId, Object paymentsValue) {
@@ -517,6 +604,100 @@ public class MembresiaSyncService {
         memberCode);
   }
 
+  private UUID resolveMembershipId(UUID tenantId, Map<String, Object> payload) {
+    final String memberCode = stringValue(payload.get("code"), null);
+    if (memberCode != null && !memberCode.isBlank()) {
+      final UUID membershipId = existingMembershipId(tenantId, memberCode);
+      if (membershipId != null) {
+        return membershipId;
+      }
+    }
+
+    final String externalId = stringValue(payload.get("id"), null);
+    if (externalId == null || externalId.isBlank()) {
+      return null;
+    }
+
+    return jdbcTemplate.query(
+        """
+            select id from memberships
+            where tenant_id = ? and snapshot_jsonb ->> 'id' = ?
+            limit 1
+            """,
+        rs -> rs.next() ? rs.getObject("id", UUID.class) : null,
+        tenantId,
+        externalId);
+  }
+
+  private String resolveMemberCode(UUID tenantId, UUID membershipId, Map<String, Object> payload) {
+    if (membershipId != null) {
+      return memberCodeByMembershipId(membershipId);
+    }
+
+    final String provided = stringValue(payload.get("code"), null);
+    if (provided != null && !provided.isBlank()) {
+      return provided.trim().toUpperCase();
+    }
+
+    return nextMemberCode(tenantId);
+  }
+
+  private String memberCodeByMembershipId(UUID membershipId) {
+    return jdbcTemplate.query(
+        "select member_code from memberships where id = ? limit 1",
+        rs -> rs.next() ? rs.getString("member_code") : null,
+        membershipId);
+  }
+
+  private String nextMemberCode(UUID tenantId) {
+    for (int attempt = 0; attempt < 100; attempt++) {
+      final String candidate = String.format("%06d", ThreadLocalRandom.current().nextInt(100_000, 1_000_000));
+      if (!memberCodeExists(tenantId, candidate)) {
+        return candidate;
+      }
+    }
+
+    throw new ResponseStatusException(HttpStatus.CONFLICT, "No se pudo generar un codigo unico para el socio.");
+  }
+
+  private boolean memberCodeExists(UUID tenantId, String memberCode) {
+    final Integer total = jdbcTemplate.query(
+        """
+            select count(*)
+            from (
+              select 1
+              from memberships
+              where tenant_id = ?
+                and member_code = ?
+
+              union all
+
+              select 1
+              from users
+              where tenant_id = ?
+                and user_type = 'MEMBER'
+                and username = ?
+            ) codes
+            """,
+        rs -> rs.next() ? rs.getInt(1) : 0,
+        tenantId,
+        memberCode,
+        tenantId,
+        memberCode);
+    return total != null && total > 0;
+  }
+
+  private String qrTokenFor(String memberCode) {
+    return "FGM:" + memberCode;
+  }
+
+  private String requireMemberCode(String requestedUsername) {
+    if (requestedUsername == null || requestedUsername.isBlank()) {
+      throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Sesion invalida para socio.");
+    }
+    return requestedUsername;
+  }
+
   private OffsetDateTime parseTimestamp(Object value, OffsetDateTime fallback) {
     if (value instanceof String stringValue && !stringValue.isBlank()) {
       try {
@@ -576,6 +757,59 @@ public class MembresiaSyncService {
   }
 
   private List<Object> listValue(Object value) {
-    return value instanceof List<?> list ? new ArrayList<>(list) : List.of();
+    if (value instanceof List<?> list) {
+      return new ArrayList<>(list);
+    }
+    return Collections.emptyList();
+  }
+
+  private MemberSummary toMemberSummary(
+      String id,
+      String memberCode,
+      String status,
+      OffsetDateTime endsAt,
+      String snapshotJson) {
+    final Map<String, Object> snapshot = readMap(snapshotJson);
+    return new MemberSummary(
+        id,
+        memberCode,
+        stringValue(snapshot.get("nombre"), "Miembro"),
+        stringValue(snapshot.get("apellido"), "Demo"),
+        status,
+        endsAt.toInstant().toString());
+  }
+
+  private PaymentSummary toPaymentSummary(String id, String membershipId, double amount, OffsetDateTime paidAt) {
+    return new PaymentSummary(id, membershipId, amount, paidAt.toInstant().toString());
+  }
+
+  private AttendanceSummary toAttendanceSummary(String id, String membershipId, OffsetDateTime occurredAt) {
+    return new AttendanceSummary(id, membershipId, occurredAt.toInstant().toString());
+  }
+
+  private Map<String, Object> toMemberUpsert(ResultSet rs) throws SQLException {
+    final Map<String, Object> snapshot = readMap(rs.getString("snapshot"));
+    final Map<String, Object> payload = new LinkedHashMap<>();
+    payload.put("id", rs.getString("id"));
+    payload.put("code", rs.getString("member_code"));
+    payload.put("nombre", stringValue(snapshot.get("nombre"), "Miembro"));
+    payload.put("apellido", stringValue(snapshot.get("apellido"), "Demo"));
+    payload.put("telefono", stringValue(snapshot.get("telefono"), ""));
+    payload.put("password", stringValue(snapshot.get("password"), rs.getString("member_code")));
+    payload.put("fechaInicio", stringValue(snapshot.get("fechaInicio"), Instant.now().toString()));
+    payload.put("fechaFin", rs.getObject("ends_at", OffsetDateTime.class).toInstant().toString());
+    payload.put("meses", intValue(snapshot.get("meses"), 1));
+    payload.put("diaPago", intValue(snapshot.get("diaPago"), 1));
+    payload.put("routineCode", stringValue(snapshot.get("routineCode"), ""));
+    payload.put("qrToken", stringValue(snapshot.get("qrToken"), qrTokenFor(rs.getString("member_code"))));
+    payload.put("asistencias", listValue(snapshot.get("asistencias")));
+    payload.put("pagos", listValue(snapshot.get("pagos")));
+    payload.put("progreso", listValue(snapshot.get("progreso")));
+
+    return Map.of(
+        "entityType", "member",
+        "entityId", rs.getString("id"),
+        "operationType", "UPSERT",
+        "payload", payload);
   }
 }
